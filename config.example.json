@@ -183,7 +183,8 @@
       "stickerNote": true,
       "collectSticker": true,
       "getSelfImage": true,
-      "sendVoice": false
+      "sendVoice": false,
+      "drawImage": true
     },
     "wake": {
       "defaultMode": "diving",

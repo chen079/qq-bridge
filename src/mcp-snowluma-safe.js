@@ -8,6 +8,7 @@
 // - 所有调用走 OneBot HTTP API（httpUrl + accessToken）。
 import fs from 'node:fs';
 import http from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -381,6 +382,8 @@ const TOOL_CONFIG_FLAGS = {
   qq_get_self_image: 'getSelfImage',
   qq_sticker_note: 'stickerNote',
   qq_set_sticker_remark: 'setStickerRemark',
+  // 关闭开关 ⇒ 不注册；开着时还要 ComfyUI 在线才对模型可见（见文件末尾的动态显隐）
+  qq_draw_image: 'drawImage',
 };
 const disabledTools = [];
 // 别名必须同时出现在 schema 与规范化入口中，否则 Zod 会先把它丢弃。
@@ -1525,6 +1528,93 @@ if (cfg.socialV2?.tools?.getForwardMsg !== false) {
       }
     }
   );
+}
+
+// ── AI 画图：只在 ComfyUI 连得上时注入 ─────────────────────────────────────────
+//
+// 本进程由 DSH 启动时拉起并常驻，所以不能只在启动时探一次：先注册、默认隐藏，再定时探活，
+// 状态变化时 enable()/disable() —— SDK 会发 notifications/tools/list_changed，DSH 的 MCP 客户端
+// 收到后重新拉取工具清单。ComfyUI 没开时模型根本看不到这个工具，既不占 token 也不会被误调。
+// 探活时重读 config.json：控制台改 ComfyUI 地址、关闭 ComfyUI 或关掉工具开关都不用重启 DSH；
+// 只有 DSH 启动时开关就是关的（工具根本没注册），再打开才需要重启。
+//
+// 下面两个小函数与 src/comfyui.js 的 resolveComfyConfig（只取用到的三项）/ probeComfyOnline 同口径，故意内联：
+// 本文件只依赖两个本地纯模块，离线测试会把它塞进 vm 里跑（剥掉 import），多一个依赖就要改一串夹具。
+function comfyTarget(c) {
+  const src = c?.comfyui && typeof c.comfyui === 'object' ? c.comfyui : {};
+  const timeoutMs = Number(src.timeoutMs);
+  return {
+    enabled: src.enabled !== false,
+    baseUrl: String(src.baseUrl || 'http://127.0.0.1:8188').replace(/\/+$/, ''),
+    timeoutMs: Number.isFinite(timeoutMs) && timeoutMs >= 0 ? Math.floor(timeoutMs) : 5 * 60 * 1000,
+  };
+}
+
+/** GET /system_stats 回 2xx 即视为在线。走 node:http（与长轮询同一条通路），不抛错。 */
+function comfyReachable(baseUrl) {
+  return new Promise((resolve) => {
+    try {
+      const url = new URL('/system_stats', baseUrl);
+      const transport = url.protocol === 'https:' ? https : http;
+      const req = transport.request(url, { method: 'GET', timeout: 3000 }, (res) => {
+        res.resume();
+        resolve(res.statusCode >= 200 && res.statusCode < 300);
+      });
+      req.on('timeout', () => req.destroy(new Error('timeout')));
+      req.on('error', () => resolve(false));
+      req.end();
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+const drawTool = server.tool(
+  'qq_draw_image',
+  '用本机 ComfyUI 画一张图，并直接作为图片发到当前会话（只有 ComfyUI 已连接时才有这个工具）。适合群友明确请你画画、或想看某个具体画面时使用；没人要就别主动刷图，一般一次画一张。prompt 用英文、逗号分隔的 tag 描述画面（如 "1girl, cat ears, smile, sunset, upper body"），画质词与反向提示词已由系统补上，专心写内容即可。不要画色情/裸露、血腥暴力、真实人物肖像或违法内容——群友提这类要求就拒绝。生成通常要几十秒，等返回即可，不要重复调用。只有返回 ok 才代表图已发出；失败（冷却中、队列满、本会话未开放、ComfyUI 出错）就如实告诉对方，别假装画好了。图片消息不带文字，想配一句话请另用 qq_send_message 单独发；需要引用请求那条消息时传 replyToMessageId。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    prompt: z.string().describe('英文 tag 形式的画面描述，逗号分隔'),
+    replyToMessageId: z.union([z.number(), z.string()]).optional().describe('可选：引用这条消息发图（一般是请你画画的那条）')
+  },
+  async ({ key, token, prompt, replyToMessageId }) => {
+    try {
+      const c = comfyTarget(getConfig());
+      // 走 node:http：全局 fetch（undici）有 300 秒 headersTimeout，慢的出图会被它提前掐断
+      const data = await agentApiLongPoll('/api/socialV2/draw', {
+        method: 'POST',
+        body: JSON.stringify({ key, prompt: String(prompt), replyToMessageId, token }),
+        headers: { 'x-agent-token': token },
+        // 生成超时 + 发图；DSH 侧该 MCP 的 toolCallTimeoutMs 为 725000，这里不超过它
+        timeoutMs: Math.min(c.timeoutMs + 90000, 700000)
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `画图失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+if (drawTool) {
+  const probeMs = Math.max(200, Number(process.env.QQ_BRIDGE_COMFY_PROBE_MS) || 30000);
+  let misses = 0;
+  const syncDrawTool = async () => {
+    const c = getConfig();
+    const comfy = comfyTarget(c);
+    const wanted = c.socialV2?.tools?.drawImage !== false && comfy.enabled;
+    const online = wanted && await comfyReachable(comfy.baseUrl);
+    // 连续两次探不到才隐藏：生成大图时 ComfyUI 偶尔响应慢，别让工具在对话中途闪没
+    misses = online ? 0 : misses + 1;
+    if (online && !drawTool.enabled) drawTool.enable();
+    else if (drawTool.enabled && (!wanted || misses >= 2)) drawTool.disable();
+  };
+  // 先隐藏、立即探一次（不阻塞 connect：探完若在线会发 list_changed，DSH 随即刷新清单），之后定时复查
+  drawTool.disable();
+  const loop = () => {
+    syncDrawTool().catch(() => {}).finally(() => { setTimeout(loop, probeMs).unref?.(); });
+  };
+  loop();
 }
 
 await server.connect(new StdioServerTransport());

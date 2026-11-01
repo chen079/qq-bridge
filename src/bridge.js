@@ -32,7 +32,7 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
-import { WORKFLOW_DIR_NAME, createComfyClient, drawAccessRule, drawUserAllowed, fetchComfyInfo, inspectWorkflow, listWorkflows, matchDrawTrigger, resolveComfyConfig, sanitizeWorkflowFile } from './comfyui.js';
+import { WORKFLOW_DIR_NAME, aiDrawDenial, createComfyClient, drawAccessRule, drawUserAllowed, fetchComfyInfo, inspectWorkflow, listWorkflows, matchDrawTrigger, probeComfyOnline, resolveComfyConfig, sanitizeWorkflowFile } from './comfyui.js';
 import {
   loadSlang,
   saveSlang,
@@ -831,7 +831,8 @@ function loadConfig() {
         setStickerRemark: false,
         stickerNote: true,
         collectSticker: true,
-        getSelfImage: true
+        getSelfImage: true,
+        drawImage: true
       },
       wake: {
         defaultMode: 'diving',
@@ -958,6 +959,8 @@ function loadConfig() {
     collectSticker: true,
     getSelfImage: true,
     sendVoice: false,
+    // AI 主动画图（qq_draw_image）：另外还要 ComfyUI 在线才会注入给模型
+    drawImage: true,
     ...(cfg.socialV2.tools ?? {})
   };
 
@@ -3852,7 +3855,7 @@ async function main() {
         // 空 agent token 一律拒绝，防止 MCP 传入空字符串时被当作“管理端/无 token”绕过校验
         const closedAgentMedia = currentMode === 'closed-agent' && [
           '/api/socialV2/sticker-list', '/api/socialV2/sticker-image',
-          '/api/socialV2/send-sticker', '/api/socialV2/self-image'
+          '/api/socialV2/send-sticker', '/api/socialV2/self-image', '/api/socialV2/draw'
         ].includes(url.pathname);
         if (req.headers['x-agent-token'] === '') {
           sendJson({ ok: false, error: 'agent token 不能为空' }, 403);
@@ -5355,12 +5358,16 @@ async function main() {
             stickerNote: 'qq_sticker_note',
             collectSticker: 'qq_collect_sticker',
             getSelfImage: 'qq_get_self_image',
-            sendVoice: 'qq_send_voice / qq_list_voices'
+            sendVoice: 'qq_send_voice / qq_list_voices',
+            drawImage: 'qq_draw_image'
           };
           const tools = cfg.socialV2?.tools ?? {};
           const stickerToolFlags = new Set(['listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker']);
+          // 画图工具只在 ComfyUI 连得上时注入（见 mcp-snowluma-safe.js），这里口径一致
+          const drawToolLive = tools.drawImage !== false && await comfyOnlineForAgent();
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
+            if (flag === 'drawImage' && !drawToolLive) continue;
             if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled())) enabledTools.push(name);
           }
           sendJson({
@@ -6524,6 +6531,88 @@ async function main() {
             saveSocialV2State();
             log(`[sticker] 工具发送表情失败 ${key}: ${error?.message ?? error}`);
             sendJson({ ok: false, error: `发送表情失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
+        // AI 主动画图（qq_draw_image）：生成要几十秒，请求会一直挂到图发出去或失败。
+        // 「在哪能画」沿用画图群列表/聊天白名单，「谁的规则」见 aiDrawDenial；冷却按会话计，与群友的冷却分开。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/draw') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const prompt = String(body.prompt ?? '').trim();
+          const replyToMessageId = body.replyToMessageId;
+          if (!key || !prompt) { sendJson({ ok: false, error: 'key 和 prompt 不能为空' }, 400); return; }
+          if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: '画图必须携带 agent token' }, 403); return; }
+          if (!agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (!v2ToolEnabled('drawImage')) { sendJson({ ok: false, error: '工具未启用：qq_draw_image' }, 403); return; }
+          if (currentMode !== 'reserved2' && !closedAgentMedia) { sendJson({ ok: false, error: '该接口仅 reserved2 或管理员私聊模式可用' }, 403); return; }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const kind = keyMatch[1];
+          const id = Number(keyMatch[2]);
+          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfg, currentMode)) {
+            sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
+            return;
+          }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          const c = resolveComfyConfig(cfg.comfyui);
+          const denial = aiDrawDenial(c, kind, id, cfg.ownerQQ) || (drawAllowedHere(kind, id, c) ? '' : '这个会话没有开放画图');
+          if (denial) { sendJson({ ok: false, error: denial }, 403); return; }
+          if (prompt.length > c.maxPromptChars) {
+            sendJson({ ok: false, error: `提示词太长（${prompt.length} 字），请控制在 ${c.maxPromptChars} 字以内` }, 400);
+            return;
+          }
+          let actualReplyToMessageId = null;
+          if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
+            if (!/^-?[1-9]\d*$/.test(String(replyToMessageId).trim())) {
+              sendJson({ ok: false, error: 'replyToMessageId 必须是非零整数（消息 id 可能为负数）' }, 400);
+              return;
+            }
+            const resolved = await resolveReplyTargetV2(getSocialV2State(key), kind, id, String(replyToMessageId).trim());
+            if (!resolved) {
+              sendJson({ ok: false, error: '无法解析被引用消息，请确认 message id 正确且属于当前会话（可用 qq_get_message_detail 查看）' }, 400);
+              return;
+            }
+            actualReplyToMessageId = resolved.messageId;
+          }
+          const now = Date.now();
+          const cooldownKey = `ai:${key}`;
+          const wait = (comfyLastUse.get(cooldownKey) ?? 0) + c.cooldownMs - now;
+          if (wait > 0) { sendJson({ ok: false, error: `画得太频繁了，${Math.ceil(wait / 1000)} 秒后再试` }, 429); return; }
+          if (comfyInFlight >= Math.max(1, c.maxQueue)) { sendJson({ ok: false, error: '画图队列已满，请稍后再试' }, 429); return; }
+          const st = getSocialV2State(key);
+          const sendCfg = cfg.socialV2?.send ?? {};
+          const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
+          const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
+          const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
+          const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
+          if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
+            sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
+            return;
+          }
+          st.sendTimes.push(now);
+          if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+          comfyLastUse.set(cooldownKey, now);
+          appendActivity(`${key} [comfyui] AI 画图：${prompt.slice(0, 80)}`);
+          try {
+            const sent = await drawImageForAgent(key, prompt, { replyToMessageId: actualReplyToMessageId });
+            const doneAt = Date.now();
+            recordSentMessagesV2(key, [`[图片:AI画图「${truncateText(prompt, 60)}」]`]);
+            st.lastAiReplyAt = doneAt;
+            st.lastActionAt = doneAt;
+            st.wakeConfig.noActionCount = 0;
+            saveSocialV2State();
+            scheduleReplyCheckV2(key);
+            sendJson({ ok: true, key, sent: sent.count, seconds: sent.seconds, messageId: sent.messageId });
+          } catch (error) {
+            const idx = st.sendTimes.indexOf(now);
+            if (idx >= 0) st.sendTimes.splice(idx, 1);
+            saveSocialV2State();
+            // 失败不计冷却，方便马上重试
+            comfyLastUse.delete(cooldownKey);
+            log(`[comfyui] AI 画图失败 ${key}: ${error?.message ?? error}`);
+            sendJson({ ok: false, error: `画图失败：${agentDrawErrorText(error)}` }, 502, { safeError: true });
           }
           return;
         }
@@ -11840,7 +11929,7 @@ async function main() {
   // 因此一代/二代/各模式下行为一致，也不消耗模型 token。
   const comfy = createComfyClient(() => cfg.comfyui, { root: ROOT, log });
   let comfyInFlight = 0;
-  const comfyLastUse = new Map(); // QQ 号 -> 上次画图时间
+  const comfyLastUse = new Map(); // QQ 号 -> 上次画图时间；AI 工具按会话记为 `ai:<会话 key>`
 
   /** 取「当前消息自己的文字」并去掉开头的 @机器人，用于匹配画图指令。 */
   function drawCommandText(event) {
@@ -11886,6 +11975,69 @@ async function main() {
     return () => {
       if (!drawAllowedHere(kind, id)) throw new Error('发送已取消：画图群列表或模式已变化');
     };
+  }
+
+  // AI 画图工具只在 ComfyUI 连得上时暴露给模型。qq_get_prompt 每轮都可能调用，探活结果缓存 30 秒；
+  // MCP 侧（mcp-snowluma-safe.js）按同样口径动态显隐 qq_draw_image。
+  let comfyProbe = { at: 0, baseUrl: '', online: false };
+  async function comfyOnlineForAgent() {
+    const c = resolveComfyConfig(cfg.comfyui);
+    if (!c.enabled) return false;
+    if (comfyProbe.baseUrl === c.baseUrl && Date.now() - comfyProbe.at < 30000) return comfyProbe.online;
+    const online = await probeComfyOnline(c.baseUrl, 1500);
+    comfyProbe = { at: Date.now(), baseUrl: c.baseUrl, online };
+    return online;
+  }
+
+  /**
+   * AI 调用的画图：生成后作为图片消息发到会话（可引用一条消息），不带文字、不发回执。
+   * 权限/冷却/频率由 /api/socialV2/draw 判定；这里只负责生成与按会话顺序发送。
+   */
+  async function drawImageForAgent(key, prompt, { replyToMessageId = null } = {}) {
+    const [kind, id] = key.split(':');
+    const assertSendAllowed = captureSendGuard(key, { ai: true, explicitAllow: true });
+    const assertDrawAllowed = captureDrawSendGuard(kind, id);
+    comfyInFlight++;
+    const startedAt = Date.now();
+    try {
+      let images;
+      // 提示词可能被写进 PNG 元数据（关闭 stripMetadata 时随图发出），先抹掉已知令牌
+      try { images = await comfy.generate(redactKnownTokensOnly(prompt)); }
+      catch (error) { error.drawPhase = 'generate'; throw error; }
+      const segments = [];
+      if (replyToMessageId !== null && replyToMessageId !== undefined) segments.push({ type: 'reply', data: { id: String(replyToMessageId) } });
+      for (const img of images) segments.push({ type: 'image', data: { file: 'base64://' + img.buffer.toString('base64') } });
+      let result;
+      const chain = sendChainFor(key).then(async () => {
+        assertSendAllowed();
+        assertDrawAllowed();
+        if (kind === 'private') result = await withTimeout(bot.sendPrivateMessage(Number(id), segments), 60000, `QQ发图 ${key}`);
+        else result = await withTimeout(bot.sendGroupMessage(Number(id), segments), 60000, `QQ发图 ${key}`);
+      });
+      rememberSendChain(key, chain.catch(() => {}));
+      await chain;
+      const seconds = Number(((Date.now() - startedAt) / 1000).toFixed(1));
+      log(`[comfyui] ${key} AI 画图完成，用时 ${seconds}s`);
+      const messageId = result?.message_id ?? (typeof result === 'number' || typeof result === 'string' ? result : null);
+      return { count: images.length, seconds, messageId: messageId == null ? null : String(messageId) };
+    } finally {
+      comfyInFlight--;
+    }
+  }
+
+  /**
+   * 给模型看的失败原因：只用固定文案。原始错误可能含 ComfyUI 地址、工作流的本机绝对路径或节点报错原文，
+   * 模型可能把它原样转述到群里；原文只写本机日志（调用方已 log）。
+   */
+  function agentDrawErrorText(error) {
+    const msg = String(error?.message ?? error ?? '');
+    if (error?.drawPhase === 'generate') {
+      if (msg.startsWith('画图超时')) return '画图超时（ComfyUI 太忙或这张图太复杂）';
+      if (msg.startsWith('连接 ComfyUI 失败')) return 'ComfyUI 连接不上（可能没开）';
+      return 'ComfyUI 生成出错（详情见桥接日志）';
+    }
+    if (msg.startsWith('发送已取消')) return '发送已取消：会话、模式或画图设置在生成期间变了';
+    return '图片已生成，但发到 QQ 失败';
   }
 
   /** 是画图指令就处理并返回 true；否则返回 false 交给正常流程。 */

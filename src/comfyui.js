@@ -102,6 +102,21 @@ export function drawUserAllowed(rule, uid, isOwner) {
   return true;
 }
 
+/**
+ * AI 主动画图（qq_draw_image）在这个会话能否使用，只看「谁的规则」；「在哪能画」由调用方另判。
+ * AI 的调用无法归到具体是哪个群友要的，所以：管理员私聊始终放行；「仅管理员可用」时其它会话一律不放行；
+ * 该会话的用户规则是白名单时也不放行 —— 否则名单外的人让 AI 代画就绕过了白名单。
+ * @returns {string} 拒绝理由；空串 = 放行
+ */
+export function aiDrawDenial(c, kind, id, ownerQQ) {
+  if (!c.enabled) return 'AI 画图已关闭';
+  const owner = String(ownerQQ ?? '').trim();
+  if (kind === 'private' && owner && String(id) === owner) return '';
+  if (c.ownerOnly) return '画图目前仅管理员可用，AI 不能在这里代画';
+  if (drawAccessRule(c, kind, id).accessMode === 'whitelist') return '这里的画图只对白名单用户开放，AI 不能代画';
+  return '';
+}
+
 export function resolveComfyConfig(raw) {
   const src = raw && typeof raw === 'object' ? raw : {};
   const c = { ...COMFYUI_DEFAULTS, ...src };
@@ -492,6 +507,21 @@ export function listWorkflows(dir) {
     catch (error) { info = { ok: false, error: `JSON 解析失败：${error?.message ?? error}` }; }
     return { file, path: `${WORKFLOW_DIR_NAME}/${file}`, ...info };
   });
+}
+
+/**
+ * 只探活（GET /system_stats 回 2xx 即在线），决定要不要把 AI 画图工具暴露给模型。不抛错。
+ * 比 fetchComfyInfo 轻：一次请求，不读模型列表。mcp-snowluma-safe.js 里有一份同口径的内联实现。
+ */
+export async function probeComfyOnline(baseUrl, timeoutMs = 2000) {
+  const base = String(baseUrl || COMFYUI_DEFAULTS.baseUrl).replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${base}/system_stats`, { signal: AbortSignal.timeout(timeoutMs) });
+    await res.arrayBuffer().catch(() => {});
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**

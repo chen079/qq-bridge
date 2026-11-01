@@ -1,13 +1,20 @@
-// ComfyUI 画图：纯函数 + 假 ComfyUI 服务上的完整链路（QQ 触发 → 出图回复；控制台工作流管理）。
+// ComfyUI 画图：纯函数 + 假 ComfyUI 服务上的完整链路（QQ 触发 → 出图回复；控制台工作流管理；
+// AI 工具 qq_draw_image 的桥接接口与 MCP 按在线状态动态注入）。
 // 离线：不连真实 ComfyUI、不发真 QQ 消息。
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 import {
-  createComfyClient, fillCustomWorkflow, inspectWorkflow, matchDrawTrigger, resolveComfyConfig, sanitizeWorkflowFile,
+  aiDrawDenial, createComfyClient, fillCustomWorkflow, inspectWorkflow, matchDrawTrigger, probeComfyOnline, resolveComfyConfig, sanitizeWorkflowFile,
 } from '../src/comfyui.js';
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 let failed = 0;
 async function test(name, fn) {
@@ -225,6 +232,156 @@ try {
     } finally {
       await new Promise((r) => server.close(r));
       await h.close();
+    }
+  });
+
+  // 一个确定没人监听的端口：探活/生成都应该连不上
+  const deadUrl = await new Promise((resolve) => {
+    const s = http.createServer();
+    s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(`http://127.0.0.1:${port}`)); });
+  });
+
+  await test('AI 画图权限：管理员私聊始终可画；仅管理员/白名单规则下其它会话不让 AI 代画', async () => {
+    const c = (raw) => resolveComfyConfig(raw);
+    assert.equal(aiDrawDenial(c({}), 'group', 456, 123), '');
+    assert.equal(aiDrawDenial(c({ groups: [{ id: '456', accessMode: 'blacklist', denyUsers: ['1'] }] }), 'group', 456, 123), '', '黑名单不影响 AI');
+    assert.match(aiDrawDenial(c({ enabled: false }), 'private', 123, 123), /关闭/);
+    assert.match(aiDrawDenial(c({ ownerOnly: true }), 'group', 456, 123), /仅管理员/);
+    assert.equal(aiDrawDenial(c({ ownerOnly: true }), 'private', 123, 123), '');
+    assert.match(aiDrawDenial(c({ ownerOnly: true }), 'private', 999, 123), /仅管理员/);
+    assert.match(aiDrawDenial(c({ groups: [{ id: '456', accessMode: 'whitelist', allowUsers: ['1'] }] }), 'group', 456, 123), /白名单/);
+    assert.match(aiDrawDenial(c({ privateAccess: { accessMode: 'whitelist' } }), 'private', 999, 123), /白名单/);
+    assert.equal(await probeComfyOnline(baseUrl), true);
+    assert.equal(await probeComfyOnline(deadUrl, 500), false);
+  });
+
+  await test('AI 画图接口：带令牌出图发到会话、按会话冷却、开关/权限/令牌校验、qq_get_prompt 只在在线时列出', async () => {
+    const h = await bridgeHarness({ config: { comfyui: { baseUrl, cooldownMs: 60000 }, sendDelayMs: 0 } });
+    const server = h.startConsoleServer();
+    try {
+      if (!server.listening) await new Promise((r) => server.once('listening', r));
+      h.setMode('reserved2');
+      const KEY = 'group:456';
+      const token = h.getSocialV2State(KEY).agentToken;
+      const port = server.address().port;
+      const call = (p, body, agentToken = token) => new Promise((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1', port, path: p, method: body === undefined ? 'GET' : 'POST',
+          headers: { 'content-type': 'application/json', 'x-console-token': 'fixture-console-token', 'x-agent-call': '1', ...(agentToken ? { 'x-agent-token': agentToken } : {}) },
+        }, (res) => {
+          let data = '';
+          res.on('data', (ch) => { data += ch; });
+          res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(data || '{}') }));
+        });
+        req.on('error', reject);
+        req.end(body === undefined ? undefined : JSON.stringify(body));
+      });
+
+      const prompt = await call(`/api/socialV2/prompt?key=${KEY}`);
+      assert.equal(prompt.status, 200, JSON.stringify(prompt.body));
+      assert.ok(JSON.stringify(prompt.body).includes('qq_draw_image'), 'ComfyUI 在线时 qq_get_prompt 列出画图工具');
+
+      h.calls.sent.length = 0;
+      const drawn = await call('/api/socialV2/draw', { key: KEY, prompt: 'a cute cat, sunset' });
+      assert.equal(drawn.status, 200, JSON.stringify(drawn.body));
+      assert.equal(drawn.body.sent, 1);
+      assert.equal(submitted.at(-1)[6].inputs.text, 'a cute cat, sunset');
+      const img = h.calls.sent.find((s) => Array.isArray(s.text));
+      assert.ok(img, '应发出图片消息');
+      assert.equal(img.kind, 'group');
+      assert.equal(String(img.id), '456');
+      assert.equal(img.text.length, 1, '不带引用时只有一张图，不带文字');
+      assert.equal(img.text[0].type, 'image');
+      assert.ok(img.text[0].data.file.startsWith('base64://'));
+      assert.ok(h.getSocialV2State(KEY).recentMessages.at(-1).text.includes('AI画图'), 'AI 的会话记录里记下自己发了图');
+
+      const again = await call('/api/socialV2/draw', { key: KEY, prompt: 'again' });
+      assert.equal(again.status, 429);
+      assert.match(again.body.error, /秒后再试/);
+
+      h.cfg.comfyui = { baseUrl, cooldownMs: 0 };
+      assert.equal((await call('/api/socialV2/draw', { key: KEY, prompt: 'x' }, '')).status, 403, '没带令牌');
+      assert.equal((await call('/api/socialV2/draw', { key: KEY, prompt: 'x' }, 'not-a-token')).status, 403, '假令牌');
+      assert.equal((await call('/api/socialV2/draw', { key: KEY, prompt: 'x', replyToMessageId: 'abc' })).status, 400);
+      h.cfg.comfyui = { baseUrl, cooldownMs: 0, ownerOnly: true };
+      assert.equal((await call('/api/socialV2/draw', { key: KEY, prompt: 'x' })).status, 403, '仅管理员时群里不能代画');
+      h.cfg.comfyui = { baseUrl, cooldownMs: 0, groups: ['999'] };
+      assert.equal((await call('/api/socialV2/draw', { key: KEY, prompt: 'x' })).status, 403, '不在画图群列表');
+      h.cfg.comfyui = { baseUrl, cooldownMs: 0 };
+      h.cfg.socialV2.tools.drawImage = false;
+      const off = await call('/api/socialV2/draw', { key: KEY, prompt: 'x' });
+      assert.equal(off.status, 403);
+      assert.match(off.body.error, /工具未启用/);
+      h.cfg.socialV2.tools.drawImage = true;
+
+      h.cfg.comfyui = { baseUrl: deadUrl, cooldownMs: 0 };
+      const offline = await call(`/api/socialV2/prompt?key=${KEY}`);
+      assert.ok(!JSON.stringify(offline.body).includes('qq_draw_image'), 'ComfyUI 离线时不列出画图工具');
+      const failed = await call('/api/socialV2/draw', { key: KEY, prompt: 'x' });
+      assert.equal(failed.status, 502);
+      assert.equal(failed.body.error, '画图失败：ComfyUI 连接不上（可能没开）');
+      assert.ok(!failed.body.error.includes(deadUrl.split(':').pop()), '不把 ComfyUI 地址等原始错误给模型');
+      assert.ok(!h.calls.sent.some((s, i) => i > 0 && Array.isArray(s.text)), '失败时不发图');
+    } finally {
+      await new Promise((r) => server.close(r));
+      await h.close();
+    }
+  });
+
+  await test('MCP：qq_draw_image 只在 ComfyUI 在线且开关打开时注入，状态变化时动态显隐', async () => {
+    // MCP 按自身位置找 config.json，所以把相关源码复制到临时目录，node_modules 用目录联接指回仓库
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-mcp-draw-'));
+    const writeConfig = (obj) => fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ consolePort: 1, ...obj }));
+    let client;
+    const live = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{}'); });
+    await new Promise((r) => live.listen(0, '127.0.0.1', r));
+    const liveUrl = `http://127.0.0.1:${live.address().port}`;
+    try {
+      fs.mkdirSync(path.join(dir, 'src'));
+      for (const f of ['mcp-snowluma-safe.js', 'sensitive.js', 'qq-model-view.js']) {
+        fs.copyFileSync(path.join(ROOT, 'src', f), path.join(dir, 'src', f));
+      }
+      fs.symlinkSync(path.join(ROOT, 'node_modules'), path.join(dir, 'node_modules'), 'junction');
+      const start = async () => {
+        client = new Client({ name: 'draw-probe-test', version: '0.0.0' });
+        await client.connect(new StdioClientTransport({
+          command: process.execPath, args: [path.join(dir, 'src', 'mcp-snowluma-safe.js')], cwd: dir, stderr: 'pipe',
+          env: { ...process.env, QQ_BRIDGE_COMFY_PROBE_MS: '200' },
+        }));
+      };
+      const hasDraw = async () => (await client.listTools()).tools.some((t) => t.name === 'qq_draw_image');
+      const waitFor = async (want, label) => {
+        for (let i = 0; i < 50; i++) {
+          if (await hasDraw() === want) return;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        assert.fail(label);
+      };
+
+      writeConfig({ comfyui: { baseUrl: deadUrl } });
+      await start();
+      assert.equal(await hasDraw(), false, 'ComfyUI 离线：启动时不注入');
+      writeConfig({ comfyui: { baseUrl: liveUrl } });
+      await waitFor(true, 'ComfyUI 上线后应注入');
+      const tool = (await client.listTools()).tools.find((t) => t.name === 'qq_draw_image');
+      assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), ['key', 'prompt', 'replyToMessageId', 'token']);
+      writeConfig({ comfyui: { baseUrl: liveUrl }, socialV2: { tools: { drawImage: false } } });
+      await waitFor(false, '控制台关掉开关后应立即隐藏');
+      writeConfig({ comfyui: { baseUrl: liveUrl } });
+      await waitFor(true, '重新打开开关后应再次注入');
+      await new Promise((r) => live.close(r));
+      await waitFor(false, 'ComfyUI 下线后应隐藏');
+      await client.close();
+
+      writeConfig({ comfyui: { baseUrl }, socialV2: { tools: { drawImage: false } } });
+      await start();
+      assert.equal(await hasDraw(), false, '开关关闭时启动就不注册');
+    } finally {
+      await client?.close().catch(() => {});
+      if (live.listening) live.close();
+      // 先摘掉目录联接本身，避免任何清理逻辑顺着它进到仓库的 node_modules
+      try { fs.unlinkSync(path.join(dir, 'node_modules')); } catch {}
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 } finally {
