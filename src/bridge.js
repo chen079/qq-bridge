@@ -32,6 +32,7 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
+import { WORKFLOW_DIR_NAME, createComfyClient, drawAccessRule, drawUserAllowed, fetchComfyInfo, inspectWorkflow, listWorkflows, matchDrawTrigger, resolveComfyConfig, sanitizeWorkflowFile } from './comfyui.js';
 import {
   loadSlang,
   saveSlang,
@@ -746,6 +747,8 @@ function loadConfig() {
       interceptNotify: true,
       ...(file.security ?? {})
     },
+    // ComfyUI 画图：「画图 <提示词>」直接由桥接调用 ComfyUI 生成并发图，不经过模型
+    comfyui: file.comfyui ?? {},
     slang: {
       enabled: true,
       extractMinMessages: 10,
@@ -3676,7 +3679,8 @@ async function main() {
       }
       const SECURITY_HEADERS = {
         'X-Frame-Options': 'DENY',
-        'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+        // img-src data:：AI 画图页的「测试出图」预览（图片由本地 API 以 base64 返回）
+        'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
         'Cache-Control': 'no-store',
         'X-Content-Type-Options': 'nosniff',
         'Referrer-Policy': 'no-referrer'
@@ -4691,6 +4695,141 @@ async function main() {
           cfg.security = { ...(cfg.security ?? {}), ...next };
           log(`控制台：安全拦截通知已更新（interceptNotify=${cfg.security.interceptNotify}）`);
           sendJson({ ok: true, security: cfg.security });
+          return;
+        }
+        // ── ComfyUI 画图 ──────────────────────────────────────────────────────
+        if (req.method === 'GET' && url.pathname === '/api/comfyui') {
+          const config = resolveComfyConfig(cfg.comfyui);
+          const workflows = listWorkflows(path.join(ROOT, WORKFLOW_DIR_NAME));
+          sendJson({
+            config,
+            workflowDir: WORKFLOW_DIR_NAME,
+            workflows,
+            comfy: await fetchComfyInfo(config.baseUrl, workflows.map((w) => w.modelLoader?.classType).filter(Boolean)),
+            inFlight: comfyInFlight
+          });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/comfyui') {
+          const body = await readBody();
+          const configFile = path.join(ROOT, 'config.json');
+          const file = readConfigObject(configFile);
+          const allowed = ['enabled', 'baseUrl', 'triggers', 'ownerOnly', 'workflowPath', 'workflowModels', 'checkpoint', 'promptPrefix', 'negativePrompt', 'width', 'height', 'steps', 'cfg', 'sampler', 'scheduler', 'timeoutMs', 'cooldownMs', 'maxQueue', 'maxPromptChars', 'ackMessage', 'stripMetadata', 'groups', 'privateAccess', 'denyMessages'];
+          const next = { ...(file.comfyui ?? {}) };
+          for (const k of allowed) if (body[k] !== undefined) next[k] = body[k];
+          // 控制台只能选工作流目录里的文件（手改 config.json 不受此限）
+          if (body.workflowPath !== undefined && body.workflowPath !== '') {
+            const name = sanitizeWorkflowFile(String(body.workflowPath).replace(/^.*[\/]/, ''));
+            if (!name || !fs.existsSync(path.join(ROOT, WORKFLOW_DIR_NAME, name))) {
+              sendJson({ ok: false, error: '工作流文件不存在' }, 400);
+              return;
+            }
+            next.workflowPath = `${WORKFLOW_DIR_NAME}/${name}`;
+          }
+          try {
+            const u = new URL(String(next.baseUrl || 'http://127.0.0.1:8188'));
+            if (!/^https?:$/.test(u.protocol)) throw new Error('协议必须是 http/https');
+          } catch (error) {
+            sendJson({ ok: false, error: `ComfyUI 地址无效：${error?.message ?? error}` }, 400);
+            return;
+          }
+          if (typeof next.triggers === 'string') next.triggers = next.triggers.split(/[,，\n]/);
+          // workflowModel：只改当前选中工作流的模型（空 = 用工作流文件里的），其它工作流的选择保留
+          if (body.workflowModel !== undefined && next.workflowPath) {
+            const models = { ...(next.workflowModels && typeof next.workflowModels === 'object' ? next.workflowModels : {}) };
+            const model = String(body.workflowModel ?? '').trim();
+            if (model) models[next.workflowPath] = model;
+            else delete models[next.workflowPath];
+            next.workflowModels = models;
+          }
+          const resolved = resolveComfyConfig(next);
+          if (!resolved.triggers.length) {
+            sendJson({ ok: false, error: '至少要有一个触发词' }, 400);
+            return;
+          }
+          if (resolved.width < 64 || resolved.height < 64 || resolved.width > 4096 || resolved.height > 4096) {
+            sendJson({ ok: false, error: '宽高需在 64~4096 之间' }, 400);
+            return;
+          }
+          // 落盘保存规范化后的值，避免字符串数字等脏数据
+          file.comfyui = resolved;
+          atomicWriteJson(configFile, file);
+          cfg.comfyui = resolved;
+          comfy.resetCache();
+          const accessLabel = resolved.groups.length ? `画图群 ${resolved.groups.map((g) => g.id).join(',')} (${resolved.groups.map((g) => g.accessMode).join(',')})` : '沿用聊天白名单';
+          log(`控制台：ComfyUI 画图设置已更新（${resolved.enabled ? '开启' : '关闭'}，工作流 ${resolved.workflowPath || '内置'}，${accessLabel}）`);
+          sendJson({ ok: true, config: resolved });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/comfyui/workflow') {
+          const body = await readBody();
+          const name = sanitizeWorkflowFile(body.name);
+          if (!name) {
+            sendJson({ ok: false, error: '文件名只能包含中英文、数字、空格、- _ . ( )，且不超过 80 字' }, 400);
+            return;
+          }
+          let wf = body.content;
+          if (typeof wf === 'string') {
+            try { wf = JSON.parse(wf); } catch (error) {
+              sendJson({ ok: false, error: `JSON 解析失败：${error?.message ?? error}` }, 400);
+              return;
+            }
+          }
+          const info = inspectWorkflow(wf);
+          if (!info.ok) {
+            sendJson({ ok: false, error: info.error }, 400);
+            return;
+          }
+          const target = path.join(ROOT, WORKFLOW_DIR_NAME, name);
+          if (fs.existsSync(target) && body.overwrite !== true) {
+            sendJson({ ok: false, error: `已存在同名工作流 ${name}`, exists: true }, 409);
+            return;
+          }
+          atomicWriteJson(target, wf);
+          log(`控制台：已导入 ComfyUI 工作流 ${name}`);
+          sendJson({ ok: true, file: name, path: `${WORKFLOW_DIR_NAME}/${name}`, ...info });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/comfyui/workflow/delete') {
+          const body = await readBody();
+          const name = sanitizeWorkflowFile(body.file);
+          const target = name ? path.join(ROOT, WORKFLOW_DIR_NAME, name) : '';
+          if (!name || !fs.existsSync(target)) {
+            sendJson({ ok: false, error: '工作流文件不存在' }, 404);
+            return;
+          }
+          fs.unlinkSync(target);
+          // 删掉的正好是当前在用的：退回内置工作流
+          const current = resolveComfyConfig(cfg.comfyui);
+          if (current.workflowPath === `${WORKFLOW_DIR_NAME}/${name}`) {
+            const configFile = path.join(ROOT, 'config.json');
+            const file = readConfigObject(configFile);
+            file.comfyui = { ...current, workflowPath: '' };
+            atomicWriteJson(configFile, file);
+            cfg.comfyui = file.comfyui;
+          }
+          log(`控制台：已删除 ComfyUI 工作流 ${name}`);
+          sendJson({ ok: true });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/comfyui/test') {
+          const body = await readBody();
+          const prompt = String(body.prompt ?? '').trim();
+          if (!prompt) {
+            sendJson({ ok: false, error: '请填写提示词' }, 400);
+            return;
+          }
+          const startedAt = Date.now();
+          try {
+            const images = await comfy.generate(prompt);
+            sendJson({
+              ok: true,
+              seconds: Number(((Date.now() - startedAt) / 1000).toFixed(1)),
+              images: images.map((img) => ({ filename: img.filename, dataUrl: `data:${img.mimeType};base64,${img.buffer.toString('base64')}` }))
+            });
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 502);
+          }
           return;
         }
         // ── 控制台访问令牌（可手动修改/生成随机） ─────────────────────────────
@@ -7852,9 +7991,10 @@ async function main() {
   // 更新 lastAiReplyAt / 活跃调度，实际群里什么都没收到，而且只有一行滚动日志能看出问题。
   const lastSendFailed = new Map(); // key -> true（下一次成功即清除）
 
-  function sendToQQ(key, msg, { ai = false } = {}) {
+  // guard：可选的发送前复核函数，默认按聊天白名单/会话判断（画图另有自己的群列表，会传入自己的守卫）
+  function sendToQQ(key, msg, { ai = false, guard } = {}) {
     let sendChain = sendChainFor(key);
-    const assertSendAllowed = captureSendGuard(key, { ai });
+    const assertSendAllowed = guard ?? captureSendGuard(key, { ai });
     const safeMsg = redactKnownTokensOnly(msg);
     const [kind, id] = key.split(':');
     const parts = splitForQQ(safeMsg);
@@ -11695,10 +11835,146 @@ async function main() {
     promptQueues.clear();
   }
 
+  // ── ComfyUI 画图 ────────────────────────────────────────────────────────
+  // 「画图 <提示词>」由桥接直接调用 ComfyUI，生成后以图片回复原消息；不经过 DSH 模型，
+  // 因此一代/二代/各模式下行为一致，也不消耗模型 token。
+  const comfy = createComfyClient(() => cfg.comfyui, { root: ROOT, log });
+  let comfyInFlight = 0;
+  const comfyLastUse = new Map(); // QQ 号 -> 上次画图时间
+
+  /** 取「当前消息自己的文字」并去掉开头的 @机器人，用于匹配画图指令。 */
+  function drawCommandText(event) {
+    const segs = Array.isArray(event.message) ? event.message : null;
+    if (!segs) return String(event.message ?? event.raw_message ?? '').trim();
+    let leading = true;
+    const parts = [];
+    for (const seg of segs) {
+      if (seg?.type === 'reply') continue;
+      if (leading && seg?.type === 'at') continue;
+      if (seg?.type === 'text') {
+        const t = String(seg.data?.text ?? '');
+        if (leading && !t.trim()) continue;
+        leading = false;
+        parts.push(t);
+      } else if (seg?.type !== 'at') {
+        leading = false;
+      }
+    }
+    return parts.join('').trim();
+  }
+
+  /**
+   * 这个会话能不能画图（只看「在哪」，不看「谁」）。
+   * 群聊：comfyui.groups 非空时只看它，与聊天白名单互不影响（不在聊天白名单的群也能只开放画图）；
+   *       留空则沿用聊天白名单。closed-agent（仅管理员私聊）模式下群聊一律不能画。
+   * 私聊：沿用聊天白名单。
+   * 「谁」能画由 drawAccessRule 取该群/私聊自己的规则，再交给 drawUserAllowed 判断。
+   */
+  function drawAllowedHere(kind, id, c = resolveComfyConfig(cfg.comfyui)) {
+    if (!c.enabled) return false;
+    if (kind === 'group' && c.groups.length > 0) {
+      return currentMode !== 'closed-agent' && c.groups.some((g) => g.id === String(id));
+    }
+    return modeAllowed(convKey(kind, id), kind, id, cfg, currentMode);
+  }
+
+  /**
+   * 画图的发送守卫：发出前按最新配置复核。不能用 captureSendGuard ——
+   * 它按聊天白名单判断，会把「只开放画图」的群的回复全部拦掉。
+   */
+  function captureDrawSendGuard(kind, id) {
+    return () => {
+      if (!drawAllowedHere(kind, id)) throw new Error('发送已取消：画图群列表或模式已变化');
+    };
+  }
+
+  /** 是画图指令就处理并返回 true；否则返回 false 交给正常流程。 */
+  async function maybeHandleDraw(key, kind, id, event, isOwner) {
+    const c = resolveComfyConfig(cfg.comfyui);
+    if (!c.enabled) return false;
+    const prompt = matchDrawTrigger(drawCommandText(event), c.triggers);
+    if (prompt === null) return false;
+    if (!drawAllowedHere(kind, id, c)) {
+      // 只有「在聊天白名单、但不在画图群列表」的群会走到这里，按聊天会话回复即可
+      if (c.denyMessages.group) await sendToQQ(key, c.denyMessages.group);
+      return true;
+    }
+    const reply = (msg) => sendToQQ(key, msg, { guard: captureDrawSendGuard(kind, id) });
+    if (c.ownerOnly && !isOwner) {
+      if (c.denyMessages.ownerOnly) await reply(c.denyMessages.ownerOnly);
+      return true;
+    }
+    const uid = String(event.user_id ?? '');
+    const rule = drawAccessRule(c, kind, id);
+    if (!drawUserAllowed(rule, uid, isOwner)) {
+      const msg = c.denyMessages[rule.accessMode] ?? '';
+      if (msg) await reply(msg);
+      return true;
+    }
+    if (!prompt) {
+      await reply(`用法：${c.triggers[c.triggers.length - 1] ?? '画图'} <提示词>，例如「画图 1girl, cat ears, smile」（英文 tag 效果更好）`);
+      return true;
+    }
+    if (prompt.length > c.maxPromptChars) {
+      await reply(`提示词太长了（${prompt.length} 字），请控制在 ${c.maxPromptChars} 字以内。`);
+      return true;
+    }
+    const now = Date.now();
+    const wait = (comfyLastUse.get(uid) ?? 0) + c.cooldownMs - now;
+    if (!isOwner && wait > 0) {
+      await reply(`画得太快啦，${Math.ceil(wait / 1000)} 秒后再试。`);
+      return true;
+    }
+    if (comfyInFlight >= Math.max(1, c.maxQueue)) {
+      await reply('画图队列已满，请稍后再试。');
+      return true;
+    }
+    comfyInFlight++;
+    comfyLastUse.set(uid, now);
+    appendActivity(`${key} 画图请求（${uid}）：${prompt.slice(0, 80)}`);
+    if (c.ackMessage) await reply(c.ackMessage);
+    const replyId = event.message_id ?? null;
+    // 生成要几十秒，不阻塞后续消息处理
+    (async () => {
+      const assertSendAllowed = captureDrawSendGuard(kind, id);
+      const startedAt = Date.now();
+      try {
+        const images = await comfy.generate(prompt);
+        const segments = [];
+        if (replyId !== null && replyId !== undefined) segments.push({ type: 'reply', data: { id: String(replyId) } });
+        for (const img of images) segments.push({ type: 'image', data: { file: 'base64://' + img.buffer.toString('base64') } });
+        const chain = sendChainFor(key).then(async () => {
+          assertSendAllowed();
+          if (kind === 'private') await withTimeout(bot.sendPrivateMessage(Number(id), segments), 60000, `QQ发图 ${key}`);
+          else await withTimeout(bot.sendGroupMessage(Number(id), segments), 60000, `QQ发图 ${key}`);
+        });
+        rememberSendChain(key, chain.catch(() => {}));
+        await chain;
+        log(`[comfyui] ${key} 画图完成，用时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+      } catch (error) {
+        const msg = error?.message ?? String(error);
+        log(`[comfyui] ${key} 画图失败：${msg}`);
+        // 失败不计入冷却，方便马上重试
+        comfyLastUse.delete(uid);
+        await reply(`画图失败：${msg.slice(0, 200)}`).catch(() => {});
+      } finally {
+        comfyInFlight--;
+      }
+    })();
+    return true;
+  }
+
   // QQ 消息 → DSH prompt
   async function handleIncoming(kind, id, event, cfg) {
     const key = convKey(kind, id);
     if (!modeAllowed(key, kind, id, cfg, currentMode)) {
+      // 画图有独立的群列表：不在聊天白名单的群也可以只开放画图（其它消息照旧忽略，不进 AI）
+      // ignore.sendQQ 里的发送者在这里同样不能画图（与下方正常流程一致）
+      if (kind === 'group' && drawAllowedHere(kind, id) && !ignoredSender(event.user_id, cfg)) {
+        const drawOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
+        const silenced = readRoleState().mode === 'silent' && !drawOwner;
+        if (!silenced && await maybeHandleDraw(key, kind, id, event, drawOwner)) return;
+      }
       log(`忽略未授权会话 ${key}（当前模式 ${currentMode}，来自 ${event.user_id}）`);
       return;
     }
@@ -11762,6 +12038,9 @@ async function main() {
       log(`静默模式，忽略群友消息 ${key}`);
       return;
     }
+
+    // 画图指令：桥接直接调用 ComfyUI（在管理命令拦截之前，群友也能用 /draw）
+    if (await maybeHandleDraw(key, kind, id, event, isOwner)) return;
 
     // 控制类话语：仅管理员（ownerQQ）可下达；群友触发直接拦截
     if (!isOwner && /进入角色扮演|退出角色扮演|切换角色|设置角色|改角色|换角色|关闭角色扮演|开启角色扮演/.test(plainContent)) {

@@ -60,6 +60,40 @@
   "security": {
     "interceptNotify": true
   },
+  "comfyui": {
+    "enabled": true,
+    "baseUrl": "http://127.0.0.1:8188",
+    "triggers": ["画图", "/画图", "/draw", "/画"],
+    "ownerOnly": false,
+    "workflowPath": "",
+    "checkpoint": "",
+    "promptPrefix": "",
+    "negativePrompt": "lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, jpeg artifacts, signature, watermark, blurry",
+    "width": 1024,
+    "height": 1024,
+    "steps": 25,
+    "cfg": 6,
+    "sampler": "euler_ancestral",
+    "scheduler": "normal",
+    "timeoutMs": 300000,
+    "cooldownMs": 30000,
+    "maxQueue": 3,
+    "maxPromptChars": 800,
+    "ackMessage": "🎨 收到，正在画图…",
+    "stripMetadata": true,
+    "groups": [],
+    "privateAccess": {
+      "accessMode": "off",
+      "allowUsers": [],
+      "denyUsers": []
+    },
+    "denyMessages": {
+      "group": "本群未开放画图功能。",
+      "ownerOnly": "画图功能目前仅管理员可用。",
+      "whitelist": "你没有使用画图功能的权限。",
+      "blacklist": "你没有使用画图功能的权限。"
+    }
+  },
   "slang": {
     "enabled": true,
     "extractMinMessages": 10,

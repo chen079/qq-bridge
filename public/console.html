@@ -1771,6 +1771,7 @@ button:active:not(:disabled) {
       <button data-view="social-v2" class="nav-item"><span class="nav-icon" aria-hidden="true">◈</span>二代仿真<span class="nav-note">V2</span></button>
       <button data-view="social-v1" class="nav-item"><span class="nav-icon" aria-hidden="true">◇</span>一代仿真<span class="nav-note">V1</span></button>
       <button data-view="slang" class="nav-item"><span class="nav-icon" aria-hidden="true">▤</span>黑话词库</button>
+      <button data-view="comfyui" class="nav-item"><span class="nav-icon" aria-hidden="true">✎</span>AI 画图</button>
       <div class="nav-label">管理</div>
       <button data-view="usage" class="nav-item"><span class="nav-icon" aria-hidden="true">◧</span>令牌与花费</button>
       <button data-view="access" class="nav-item"><span class="nav-icon" aria-hidden="true">⊙</span>访问与安全</button>
@@ -2417,6 +2418,136 @@ button:active:not(:disabled) {
           <span class="meta" id="slangConfigMsg"></span>
         </div>
       </details>
+    </section>
+<section id="section-comfyui" data-page="comfyui" class="card span-all">
+      <h2 data-note="保存即生效">ComfyUI 画图</h2>
+      <div class="meta">QQ 里发「<b>画图 提示词</b>」（或其它触发词），桥接直接调用 ComfyUI 生成并以图片回复，不经过 AI 模型、不消耗 token。</div>
+      <div class="meta" style="margin-top:6px">ComfyUI 状态：<b id="comfyStatus">读取中…</b> <span id="comfyStatusDetail"></span></div>
+
+      <div class="row" style="margin-top:10px">
+        <label style="flex:1">启用画图</label><input type="checkbox" id="comfyEnabled" style="width:auto">
+        <label style="flex:1">仅管理员可用</label><input type="checkbox" id="comfyOwnerOnly" style="width:auto">
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label style="flex:1">发送前清除图片元数据</label><input type="checkbox" id="comfyStripMeta" style="width:auto">
+        <span class="meta" style="flex:2">ComfyUI 会把完整工作流、提示词、模型名写进图片；开启后发出的图不含这些信息（不重新编码，画质不变）。</span>
+      </div>
+      <details class="settings-group" style="margin-top:10px"><summary>画图群与用户权限</summary><div class="settings-content">
+        <div class="meta">每个群独立配置访问规则，群与群之间不互通。不填群号则沿用聊天白名单的群（不限用户）。管理员始终不受限。</div>
+        <div id="comfyGroupRules" style="display:flex;flex-direction:column;gap:8px;margin-top:8px"></div>
+        <button id="comfyAddGroup" class="small" type="button" style="margin-top:6px">＋ 添加群</button>
+        <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+          <label style="font-weight:500">私聊用户权限</label>
+          <div class="row" style="margin-top:4px;gap:8px;align-items:center">
+            <select id="comfyPrivateMode" style="flex:0 0 auto">
+              <option value="off">不限用户</option>
+              <option value="whitelist">白名单</option>
+              <option value="blacklist">黑名单</option>
+            </select>
+            <input type="text" id="comfyPrivateAllow" placeholder="白名单 QQ（逗号分隔）" style="flex:1;display:none">
+            <input type="text" id="comfyPrivateDeny" placeholder="黑名单 QQ（逗号分隔）" style="flex:1;display:none">
+          </div>
+        </div>
+        <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+          <label style="font-weight:500">拒绝时的回复（留空 = 静默不回复）</label>
+          <div class="row" style="margin-top:6px;gap:6px;align-items:center">
+            <label style="flex:0 0 100px;font-size:.85em;color:var(--text-secondary)">群未开放</label>
+            <input type="text" id="comfyDenyGroup" style="flex:1" placeholder="（留空则不回复）">
+          </div>
+          <div class="row" style="margin-top:4px;gap:6px;align-items:center">
+            <label style="flex:0 0 100px;font-size:.85em;color:var(--text-secondary)">仅管理员</label>
+            <input type="text" id="comfyDenyOwner" style="flex:1" placeholder="（留空则不回复）">
+          </div>
+          <div class="row" style="margin-top:4px;gap:6px;align-items:center">
+            <label style="flex:0 0 100px;font-size:.85em;color:var(--text-secondary)">白名单拦截</label>
+            <input type="text" id="comfyDenyWhitelist" style="flex:1" placeholder="（留空则不回复）">
+          </div>
+          <div class="row" style="margin-top:4px;gap:6px;align-items:center">
+            <label style="flex:0 0 100px;font-size:.85em;color:var(--text-secondary)">黑名单拦截</label>
+            <input type="text" id="comfyDenyBlacklist" style="flex:1" placeholder="（留空则不回复）">
+          </div>
+        </div>
+      </div></details>
+      <label>ComfyUI 地址</label>
+      <input type="text" id="comfyBaseUrl" placeholder="http://127.0.0.1:8188">
+      <label>触发词（逗号分隔；消息以其开头即触发）</label>
+      <input type="text" id="comfyTriggers" placeholder="画图, /画图, /draw, /画">
+
+      <label style="margin-top:10px">工作流</label>
+      <div class="row">
+        <select id="comfyWorkflow" style="flex:1"></select>
+        <button id="comfyReload" class="small" type="button">刷新列表</button>
+      </div>
+      <div class="meta" id="comfyWorkflowInfo"></div>
+
+      <div id="comfyCkptOpts">
+        <label style="margin-top:10px">模型（checkpoint，留空自动取第一个）</label>
+        <select id="comfyCheckpoint"></select>
+      </div>
+      <div id="comfyWfModelOpts" style="display:none">
+        <label id="comfyWfModelLabel" style="margin-top:10px">工作流模型</label>
+        <select id="comfyWorkflowModel"></select>
+      </div>
+      <div id="comfyBuiltinOpts">
+        <div class="row" style="margin-top:6px">
+          <label style="flex:0 0 auto">采样器</label><select id="comfySampler" style="flex:1"></select>
+          <label style="flex:0 0 auto">调度器</label><select id="comfyScheduler" style="flex:1"></select>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <label style="flex:0 0 auto">步数</label><input type="number" id="comfySteps" min="1" max="150" style="max-width:90px">
+          <label style="flex:0 0 auto">CFG</label><input type="number" id="comfyCfg" min="0.1" max="30" step="0.1" style="max-width:90px">
+        </div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label style="flex:0 0 auto">宽</label><input type="number" id="comfyWidth" min="64" max="4096" step="8" style="max-width:100px">
+        <label style="flex:0 0 auto">高</label><input type="number" id="comfyHeight" min="64" max="4096" step="8" style="max-width:100px">
+        <span class="meta">自定义工作流需在宽高处写 {{width}} / {{height}} 才会使用这里的值</span>
+      </div>
+      <label>提示词前缀（自动加在用户提示词前，可留空）</label>
+      <input type="text" id="comfyPromptPrefix" placeholder="masterpiece, best quality">
+      <label>反向提示词（自定义工作流需写 {{negative}} 才生效）</label>
+      <textarea id="comfyNegative" rows="3"></textarea>
+
+      <details class="settings-group"><summary>频率与超时</summary><div class="settings-content">
+        <div class="row">
+          <label style="flex:1">同一人冷却（秒，管理员不受限）</label><input type="number" id="comfyCooldown" min="0" style="max-width:110px">
+          <label style="flex:1">超时（秒）</label><input type="number" id="comfyTimeout" min="10" style="max-width:110px">
+        </div>
+        <div class="row" style="margin-top:6px">
+          <label style="flex:1">同时最多任务数</label><input type="number" id="comfyMaxQueue" min="1" max="20" style="max-width:110px">
+          <label style="flex:1">提示词最长字数</label><input type="number" id="comfyMaxPrompt" min="10" style="max-width:110px">
+        </div>
+        <label>收到请求时的回执（留空不发）</label>
+        <input type="text" id="comfyAck">
+      </div></details>
+
+      <div class="row" style="margin-top:10px">
+        <button id="comfySave" style="font-weight:bold">保存画图设置</button>
+        <span class="meta" id="comfyMsg"></span>
+      </div>
+
+      <details class="settings-group"><summary>导入 / 删除工作流</summary><div class="settings-content">
+        <div class="meta">在 ComfyUI 里搭好工作流后，用菜单「工作流 → 导出 (API)」得到 JSON。正向提示词文本写 <code>{{prompt}}</code>（不写则自动替换采样器 positive 所连的文本节点），还可用 <code>{{negative}}</code> <code>{{seed}}</code> <code>{{width}}</code> <code>{{height}}</code> <code>{{checkpoint}}</code>。文件保存在 <code id="comfyWorkflowDir">comfyui-workflows/</code>，也可以直接把文件放进去后点「刷新列表」。</div>
+        <label>名称</label>
+        <input type="text" id="comfyImportName" placeholder="例如：动漫高清修复">
+        <label>工作流 JSON（可粘贴，或选择文件）</label>
+        <input type="file" id="comfyImportFile" accept=".json,application/json">
+        <textarea id="comfyImportJson" rows="5" placeholder='{"3": {"class_type": "KSampler", ...}}'></textarea>
+        <div class="row" style="margin-top:6px">
+          <button id="comfyImport" class="small" type="button">导入</button>
+          <button id="comfyDelete" class="small danger" type="button">删除当前选中的工作流</button>
+          <span class="meta" id="comfyImportMsg"></span>
+        </div>
+      </div></details>
+
+      <details class="settings-group"><summary>测试出图（使用已保存的设置）</summary><div class="settings-content">
+        <div class="row">
+          <input type="text" id="comfyTestPrompt" placeholder="1girl, cat ears, smile, upper body" style="flex:1">
+          <button id="comfyTest" class="small" type="button">生成</button>
+        </div>
+        <div class="meta" id="comfyTestMsg"></div>
+        <div id="comfyTestImages" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px"></div>
+      </div></details>
     </section>
 <section id="section-reference" data-page="reference" class="card span-all">
       <h2>DSH 侧 MCP 工具</h2>
@@ -4366,6 +4497,269 @@ document.getElementById('slangConfigSave').addEventListener('click', async () =>
   if (r.ok) loadSlangConfig();
 });
 
+// ── ComfyUI 画图 ──────────────────────────────────────────────────────────
+let comfyState = null;
+function fillSelect(sel, values, current, emptyLabel) {
+  const opts = (emptyLabel !== undefined ? [['', emptyLabel]] : []).concat(values.map(v => [v, v]));
+  // 已保存的值不在 ComfyUI 列表里（离线/已删除）也要保留，避免一保存就被清掉
+  if (current && !values.includes(current)) opts.push([current, current + '（ComfyUI 中未找到）']);
+  sel.innerHTML = opts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
+  sel.value = current ?? '';
+}
+function renderComfyWorkflowInfo() {
+  const sel = document.getElementById('comfyWorkflow');
+  const info = document.getElementById('comfyWorkflowInfo');
+  const builtin = !sel.value;
+  const wfInfo = (comfyState?.workflows || []).find(w => w.path === sel.value);
+  document.getElementById('comfyBuiltinOpts').style.display = builtin ? '' : 'none';
+  document.getElementById('comfyCkptOpts').style.display = (builtin || wfInfo?.usesCheckpoint) ? '' : 'none';
+  const loader = wfInfo?.modelLoader;
+  const wfModelDiv = document.getElementById('comfyWfModelOpts');
+  if (!builtin && loader && comfyState?.comfy?.modelOptions) {
+    const opts = comfyState.comfy.modelOptions[loader.classType] || [];
+    const saved = (comfyState.config?.workflowModels || {})[sel.value] || '';
+    document.getElementById('comfyWfModelLabel').textContent =
+      loader.classType === 'UNETLoader' ? '扩散模型（UNET，留空保持工作流文件里的）' : '模型（留空保持工作流文件里的）';
+    fillSelect(document.getElementById('comfyWorkflowModel'), opts, saved || loader.current, '（保持工作流文件里的模型）');
+    wfModelDiv.style.display = '';
+  } else {
+    wfModelDiv.style.display = 'none';
+  }
+  document.getElementById('comfyDelete').disabled = builtin;
+  if (builtin) { info.textContent = '内置文生图工作流：Checkpoint → KSampler → SaveImage，可在下方选模型与采样参数。'; info.className = 'meta'; return; }
+  const wf = (comfyState?.workflows || []).find(w => w.path === sel.value);
+  if (!wf) { info.textContent = '⚠️ 文件不在工作流目录里，无法在控制台检查'; info.className = 'meta err'; return; }
+  if (!wf.ok) { info.textContent = '⚠️ ' + wf.error; info.className = 'meta err'; return; }
+  const modelNote = wf.usesCheckpoint ? '模型用下方选择的，' : (wf.modelLoader ? `模型可在下方替换（${wf.modelLoader.classType}），` : '模型、');
+  info.textContent = `${wf.nodeCount} 个节点；提示词注入：${wf.hasPromptPlaceholder ? '{{prompt}} 占位符' : '自动替换 positive 文本节点'}${wf.hasSaveImage ? '' : '；⚠️ 未发现 SaveImage 节点，可能没有图片输出'}。${modelNote}采样参数以工作流文件为准。`;
+  info.className = wf.hasSaveImage ? 'meta' : 'meta err';
+}
+async function loadComfy() {
+  let r;
+  try { r = await api('/api/comfyui'); } catch { return; }
+  if (!r || !r.config) return;
+  comfyState = { ...r, comfy: { ...(r.comfy || {}), modelOptions: r.comfy?.modelOptions || {} } };
+  const c = r.config;
+  const st = document.getElementById('comfyStatus');
+  st.textContent = r.comfy?.online ? '✅ 已连接' : '❌ 无法连接';
+  st.className = r.comfy?.online ? 'ok' : 'err';
+  document.getElementById('comfyStatusDetail').textContent = r.comfy?.online
+    ? `ComfyUI ${r.comfy.version || ''}${r.comfy.devices?.length ? ' ｜ ' + r.comfy.devices[0] : ''} ｜ ${r.comfy.checkpoints.length} 个模型 ｜ 进行中 ${r.inFlight || 0} 个任务`
+    : (r.comfy?.error || '');
+  document.getElementById('comfyEnabled').checked = c.enabled !== false;
+  document.getElementById('comfyOwnerOnly').checked = c.ownerOnly === true;
+  document.getElementById('comfyStripMeta').checked = c.stripMetadata !== false;
+  renderComfyGroupRules(c.groups || []);
+  const pa = c.privateAccess || { accessMode: 'off', allowUsers: [], denyUsers: [] };
+  document.getElementById('comfyPrivateMode').value = pa.accessMode || 'off';
+  document.getElementById('comfyPrivateAllow').value = (pa.allowUsers || []).join(', ');
+  document.getElementById('comfyPrivateDeny').value = (pa.denyUsers || []).join(', ');
+  renderComfyPrivateMode();
+  const dm = c.denyMessages || {};
+  document.getElementById('comfyDenyGroup').value = dm.group ?? '';
+  document.getElementById('comfyDenyOwner').value = dm.ownerOnly ?? '';
+  document.getElementById('comfyDenyWhitelist').value = dm.whitelist ?? '';
+  document.getElementById('comfyDenyBlacklist').value = dm.blacklist ?? '';
+  document.getElementById('comfyBaseUrl').value = c.baseUrl || '';
+  document.getElementById('comfyTriggers').value = (c.triggers || []).join(', ');
+  const wfSel = document.getElementById('comfyWorkflow');
+  const wfOpts = [['', '内置文生图（默认）']].concat((r.workflows || []).map(w => [w.path, w.file.replace(/\.json$/i, '') + (w.ok ? '' : '（无效）')]));
+  if (c.workflowPath && !wfOpts.some(o => o[0] === c.workflowPath)) wfOpts.push([c.workflowPath, c.workflowPath + '（不在工作流目录）']);
+  wfSel.innerHTML = wfOpts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
+  wfSel.value = c.workflowPath || '';
+  document.getElementById('comfyWorkflowDir').textContent = (r.workflowDir || 'comfyui-workflows') + '/';
+  fillSelect(document.getElementById('comfyCheckpoint'), r.comfy?.checkpoints || [], c.checkpoint, '（自动：第一个模型）');
+  fillSelect(document.getElementById('comfySampler'), r.comfy?.samplers || [], c.sampler);
+  fillSelect(document.getElementById('comfyScheduler'), r.comfy?.schedulers || [], c.scheduler);
+  document.getElementById('comfySteps').value = c.steps;
+  document.getElementById('comfyCfg').value = c.cfg;
+  document.getElementById('comfyWidth').value = c.width;
+  document.getElementById('comfyHeight').value = c.height;
+  document.getElementById('comfyPromptPrefix').value = c.promptPrefix || '';
+  document.getElementById('comfyNegative').value = c.negativePrompt || '';
+  document.getElementById('comfyCooldown').value = Math.round((c.cooldownMs ?? 0) / 1000);
+  document.getElementById('comfyTimeout').value = Math.round((c.timeoutMs ?? 0) / 1000);
+  document.getElementById('comfyMaxQueue').value = c.maxQueue;
+  document.getElementById('comfyMaxPrompt').value = c.maxPromptChars;
+  document.getElementById('comfyAck').value = c.ackMessage || '';
+  renderComfyWorkflowInfo();
+}
+// 每个画图群一行：群号 + 模式 + 白/黑名单 + 删除
+function renderComfyGroupRules(groups) {
+  const box = document.getElementById('comfyGroupRules');
+  box.innerHTML = '';
+  const rows = groups.length ? groups : [{ id: '', accessMode: 'off', allowUsers: [], denyUsers: [] }];
+  for (let i = 0; i < rows.length; i++) {
+    box.appendChild(comfyGroupRow(rows[i], i));
+  }
+}
+function comfyGroupRow(g, i) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.style.cssText = 'gap:6px;align-items:center;flex-wrap:wrap';
+  const id = document.createElement('input');
+  id.type = 'text'; id.placeholder = '群号'; id.value = g.id || ''; id.dataset.k = 'id';
+  id.style.cssText = 'flex:0 0 130px';
+  const mode = document.createElement('select');
+  for (const [v, t] of [['off', '不限'], ['whitelist', '白名单'], ['blacklist', '黑名单']]) {
+    const o = document.createElement('option'); o.value = v; o.textContent = t; mode.appendChild(o);
+  }
+  mode.value = g.accessMode || 'off'; mode.dataset.k = 'accessMode';
+  mode.style.cssText = 'flex:0 0 auto';
+  const allow = document.createElement('input');
+  allow.type = 'text'; allow.placeholder = '白名单 QQ'; allow.value = (g.allowUsers || []).join(', '); allow.dataset.k = 'allowUsers';
+  allow.style.cssText = 'flex:1;min-width:120px;display:' + (mode.value === 'whitelist' ? '' : 'none');
+  const deny = document.createElement('input');
+  deny.type = 'text'; deny.placeholder = '黑名单 QQ'; deny.value = (g.denyUsers || []).join(', '); deny.dataset.k = 'denyUsers';
+  deny.style.cssText = 'flex:1;min-width:120px;display:' + (mode.value === 'blacklist' ? '' : 'none');
+  mode.addEventListener('change', () => {
+    allow.style.display = mode.value === 'whitelist' ? '' : 'none';
+    deny.style.display = mode.value === 'blacklist' ? '' : 'none';
+  });
+  const del = document.createElement('button');
+  del.type = 'button'; del.className = 'small danger'; del.textContent = '删'; del.style.cssText = 'flex:0 0 auto';
+  del.addEventListener('click', () => { row.remove(); });
+  row.append(id, mode, allow, deny, del);
+  return row;
+}
+function collectComfyGroupRules() {
+  const out = [];
+  for (const row of document.querySelectorAll('#comfyGroupRules .row')) {
+    const get = (k) => row.querySelector(`[data-k="${k}"]`);
+    const idEl = get('id'); const modeEl = get('accessMode');
+    const allowEl = get('allowUsers'); const denyEl = get('denyUsers');
+    const id = idEl?.value.trim() || '';
+    const mode = modeEl?.value || 'off';
+    // 空群号的行跳过（但保留为占位行，不报错）
+    if (!id || !/^\d+$/.test(id)) continue;
+    out.push({ id, accessMode: mode, allowUsers: allowEl?.value || '', denyUsers: denyEl?.value || '' });
+  }
+  return out;
+}
+function renderComfyPrivateMode() {
+  const mode = document.getElementById('comfyPrivateMode').value;
+  document.getElementById('comfyPrivateAllow').style.display = mode === 'whitelist' ? '' : 'none';
+  document.getElementById('comfyPrivateDeny').style.display = mode === 'blacklist' ? '' : 'none';
+}
+document.getElementById('comfyPrivateMode').addEventListener('change', renderComfyPrivateMode);
+document.getElementById('comfyAddGroup').addEventListener('click', () => {
+  document.getElementById('comfyGroupRules').appendChild(comfyGroupRow({ accessMode: 'off' }, -1));
+});
+document.getElementById('comfyWorkflow').addEventListener('change', renderComfyWorkflowInfo);
+document.getElementById('comfyReload').addEventListener('click', loadComfy);
+document.getElementById('comfySave').addEventListener('click', async () => {
+  const num = (id) => Number(document.getElementById(id).value);
+  const r = await api('/api/comfyui', 'POST', {
+    enabled: document.getElementById('comfyEnabled').checked,
+    ownerOnly: document.getElementById('comfyOwnerOnly').checked,
+    stripMetadata: document.getElementById('comfyStripMeta').checked,
+    groups: collectComfyGroupRules(),
+    privateAccess: {
+      accessMode: document.getElementById('comfyPrivateMode').value,
+      allowUsers: document.getElementById('comfyPrivateAllow').value,
+      denyUsers: document.getElementById('comfyPrivateDeny').value,
+    },
+    denyMessages: {
+      group: document.getElementById('comfyDenyGroup').value,
+      ownerOnly: document.getElementById('comfyDenyOwner').value,
+      whitelist: document.getElementById('comfyDenyWhitelist').value,
+      blacklist: document.getElementById('comfyDenyBlacklist').value,
+    },
+    baseUrl: document.getElementById('comfyBaseUrl').value.trim(),
+    triggers: document.getElementById('comfyTriggers').value,
+    workflowPath: document.getElementById('comfyWorkflow').value,
+    workflowModel: (document.getElementById('comfyWorkflow').value && document.getElementById('comfyWfModelOpts').style.display !== 'none')
+      ? document.getElementById('comfyWorkflowModel').value : undefined,
+    checkpoint: document.getElementById('comfyCheckpoint').value,
+    sampler: document.getElementById('comfySampler').value || undefined,
+    scheduler: document.getElementById('comfyScheduler').value || undefined,
+    steps: num('comfySteps'), cfg: num('comfyCfg'), width: num('comfyWidth'), height: num('comfyHeight'),
+    promptPrefix: document.getElementById('comfyPromptPrefix').value.trim(),
+    negativePrompt: document.getElementById('comfyNegative').value.trim(),
+    cooldownMs: num('comfyCooldown') * 1000, timeoutMs: num('comfyTimeout') * 1000,
+    maxQueue: num('comfyMaxQueue'), maxPromptChars: num('comfyMaxPrompt'),
+    ackMessage: document.getElementById('comfyAck').value
+  });
+  const msg = document.getElementById('comfyMsg');
+  msg.textContent = r.ok ? '✅ 已保存，立即生效' : ('❌ ' + (r.error || '失败'));
+  msg.className = r.ok ? 'meta ok' : 'meta err';
+  if (r.ok) loadComfy();
+});
+document.getElementById('comfyImportFile').addEventListener('change', async (e) => {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  document.getElementById('comfyImportJson').value = await f.text();
+  const nameEl = document.getElementById('comfyImportName');
+  if (!nameEl.value.trim()) nameEl.value = f.name.replace(/\.json$/i, '');
+});
+document.getElementById('comfyImport').addEventListener('click', async () => {
+  const btn = document.getElementById('comfyImport');
+  const msg = document.getElementById('comfyImportMsg');
+  const body = { name: document.getElementById('comfyImportName').value.trim(), content: document.getElementById('comfyImportJson').value };
+  // 同名文件：第一次点提示，第二次点（名称未变）才覆盖
+  const overwrite = btn.dataset.overwrite === body.name;
+  const r = await api('/api/comfyui/workflow', 'POST', { ...body, overwrite });
+  if (!r.ok && r.exists) {
+    btn.dataset.overwrite = body.name;
+    msg.textContent = `⚠️ ${r.error}，再点一次「导入」覆盖`;
+    msg.className = 'meta err';
+    return;
+  }
+  delete btn.dataset.overwrite;
+  msg.textContent = r.ok ? `✅ 已导入 ${r.file}，可在上方「工作流」里选择并保存` : ('❌ ' + (r.error || '失败'));
+  msg.className = r.ok ? 'meta ok' : 'meta err';
+  if (r.ok) { document.getElementById('comfyImportJson').value = ''; document.getElementById('comfyImportFile').value = ''; loadComfy(); }
+});
+document.getElementById('comfyDelete').addEventListener('click', async () => {
+  const sel = document.getElementById('comfyWorkflow');
+  const msg = document.getElementById('comfyImportMsg');
+  if (!sel.value) return;
+  const file = sel.value.replace(/^.*[\\/]/, '');
+  const btn = document.getElementById('comfyDelete');
+  if (btn.dataset.confirm !== file) {
+    btn.dataset.confirm = file;
+    msg.textContent = `再点一次确认删除 ${file}`;
+    msg.className = 'meta err';
+    return;
+  }
+  delete btn.dataset.confirm;
+  const r = await api('/api/comfyui/workflow/delete', 'POST', { file });
+  msg.textContent = r.ok ? `✅ 已删除 ${file}` : ('❌ ' + (r.error || '失败'));
+  msg.className = r.ok ? 'meta ok' : 'meta err';
+  if (r.ok) loadComfy();
+});
+document.getElementById('comfyTest').addEventListener('click', async () => {
+  const btn = document.getElementById('comfyTest');
+  const msg = document.getElementById('comfyTestMsg');
+  const box = document.getElementById('comfyTestImages');
+  btn.disabled = true;
+  msg.textContent = '生成中…（首次加载模型可能较慢）';
+  msg.className = 'meta';
+  try {
+    const r = await api('/api/comfyui/test', 'POST', { prompt: document.getElementById('comfyTestPrompt').value.trim() });
+    if (r.ok) {
+      msg.textContent = `✅ 用时 ${r.seconds}s`;
+      msg.className = 'meta ok';
+      box.innerHTML = '';
+      for (const img of r.images || []) {
+        const el = document.createElement('img');
+        el.src = img.dataUrl;
+        el.alt = img.filename;
+        el.style.cssText = 'max-width:min(100%,360px);border-radius:8px';
+        box.appendChild(el);
+      }
+    } else {
+      msg.textContent = '❌ ' + (r.error || '失败');
+      msg.className = 'meta err';
+    }
+  } catch (error) {
+    msg.textContent = '❌ ' + (error?.message || error);
+    msg.className = 'meta err';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 function loadSecurity() {
   api('/api/security').then(r => {
     document.getElementById('secInterceptNotify').checked = r.security?.interceptNotify !== false;
@@ -4430,6 +4824,7 @@ const consolePages = {
   'social-v2': ['二代仿真', '自主参与，恰到好处。', '管理 AI 的工具、唤醒与发言节奏。展开需要调整的分组，修改后保存参数。'],
   'social-v1': ['一代仿真', '为自然对话，设定合适的节奏。', '调整参与概率、活跃周期和分条发送；所有配置项完整保留。'],
   slang: ['黑话词库', '读懂群聊里的，言外之意。', '从候选到确认，让 AI 逐渐熟悉大家的表达习惯。'],
+  comfyui: ['AI 画图', '一句话，画出你想要的。', '连接本地 ComfyUI：选择工作流与模型，群友发「画图 提示词」即可出图。'],
   usage: ['令牌与花费', '每一次思考，都算得清楚。', '实时查看 AI 的 token 消耗与花费，可下钻到每个群、每个好友、每一轮对话。'],
   access: ['访问与安全', '明确边界，安心连接。', '管理允许对话的对象、管理员权限与控制台访问凭证。'],
   operations: ['调试与运维', '让桥接，始终井然有序。', '测试消息、引导 AI，或维护桥接进程与会话工作区。'],
@@ -5047,7 +5442,7 @@ document.getElementById('usageClear').addEventListener('click', async () => {
 
 setConsolePage(location.hash.slice(1), { updateHash:false });
 
-refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets(); loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadSecurity(); refreshSimPrompt(); refreshDshModel(); refreshUsage(); refreshUsageChart(); refreshUsageRecent();
+refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets(); loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadSecurity(); loadComfy(); refreshSimPrompt(); refreshDshModel(); refreshUsage(); refreshUsageChart(); refreshUsageRecent();
 setInterval(() => { refresh(); refreshSessions(); refreshPending(); refreshSocialStatus(); refreshSlang(); }, 3000);
 // 用量看板只在本页可见时轮询：既保证「实时」，又不让其它页白白多打两份接口。
 setInterval(() => { if (currentConsolePage !== 'usage') return; refreshUsage(); refreshUsageChart(); refreshUsageRecent(); }, 3000);

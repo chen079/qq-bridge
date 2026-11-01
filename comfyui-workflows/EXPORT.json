@@ -1,0 +1,288 @@
+{
+  "64": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.40"
+    }
+  },
+  "66": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.40"
+    }
+  },
+  "67": {
+    "inputs": {
+      "text": "worst quality, low quality, lowres, score_1, score_2, score_3, jpeg artifacts, bad anatomy, watermark, artist name, weibo watermark，bad hand, signature, tattoo, hair, shoes, ",
+      "clip": [
+        "94",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.65"
+    }
+  },
+  "68": {
+    "inputs": {
+      "seed": 585773417051002,
+      "steps": 20,
+      "cfg": 4,
+      "sampler_name": "er_sde",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "94",
+        0
+      ],
+      "positive": [
+        "69",
+        0
+      ],
+      "negative": [
+        "67",
+        0
+      ],
+      "latent_image": [
+        "66",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.40"
+    }
+  },
+  "69": {
+    "inputs": {
+      "text": "masterpiece, score_9, score_8, score_7, @rella, flat color",
+      "clip": [
+        "94",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.65"
+    }
+  },
+  "70": {
+    "inputs": {
+      "clip_name": "indigoFurryMixAnima_v10_txt.safetensors",
+      "type": "stable_diffusion",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP",
+      "cnr_id": "comfy-core",
+      "ver": "0.11.0"
+    }
+  },
+  "71": {
+    "inputs": {
+      "unet_name": "indigoFurryMixAnima_v10.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器",
+      "cnr_id": "comfy-core",
+      "ver": "0.11.0"
+    }
+  },
+  "73": {
+    "inputs": {
+      "lora_name": "Anima\\Anima_detailer_by_Volnovik_v0_8.safetensors",
+      "strength_model": 0.7,
+      "strength_clip": 1,
+      "model": [
+        "71",
+        0
+      ],
+      "clip": [
+        "70",
+        0
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA",
+      "cnr_id": "comfy-core",
+      "ver": "0.36.0"
+    }
+  },
+  "75": {
+    "inputs": {
+      "lora_name": "Anima\\Anima_colorfix_v1_by_Volnovik.safetensors",
+      "strength_model": 0.6,
+      "strength_clip": 1,
+      "model": [
+        "73",
+        0
+      ],
+      "clip": [
+        "73",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA",
+      "cnr_id": "comfy-core",
+      "ver": "0.36.0"
+    }
+  },
+  "87": {
+    "inputs": {
+      "image": "watermark revised (2).png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "加载图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.24.0"
+    }
+  },
+  "88": {
+    "inputs": {
+      "invert_mask": true,
+      "blend_mode": "normal",
+      "opacity": 100,
+      "x_percent": 50,
+      "y_percent": 90,
+      "mirror": "None",
+      "scale": 0.3,
+      "aspect_ratio": 1,
+      "rotate": 0,
+      "transform_method": "lanczos",
+      "anti_aliasing": 0,
+      "background_image": [
+        "114:65",
+        0
+      ],
+      "layer_image": [
+        "87",
+        0
+      ],
+      "layer_mask": [
+        "87",
+        1
+      ]
+    },
+    "class_type": "LayerUtility: ImageBlendAdvance",
+    "_meta": {
+      "title": "图层工具：图像混合(高级)",
+      "cnr_id": "comfyui_layerstyle",
+      "ver": "d94bef1ee5ed3656f5ff1bb2830a4ffd94f40935"
+    }
+  },
+  "93": {
+    "inputs": {
+      "lora_name": "Anima\\anima-turbo-lora-v0.2.safetensors",
+      "strength_model": 1,
+      "strength_clip": 1,
+      "model": [
+        "75",
+        0
+      ],
+      "clip": [
+        "75",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA",
+      "cnr_id": "comfy-core",
+      "ver": "0.36.0"
+    }
+  },
+  "94": {
+    "inputs": {
+      "lora_name": "Anima\\atomsphere_style_v1.2-anima-e20.safetensors",
+      "strength_model": 1,
+      "strength_clip": 1,
+      "model": [
+        "93",
+        0
+      ],
+      "clip": [
+        "93",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA",
+      "cnr_id": "comfy-core",
+      "ver": "0.36.0"
+    }
+  },
+  "112": {
+    "inputs": {
+      "images": [
+        "114:65",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.36.0"
+    }
+  },
+  "113": {
+    "inputs": {
+      "filename_prefix": "2026-10-31/ComfyUI",
+      "images": [
+        "88",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.24.0"
+    }
+  },
+  "114:65": {
+    "inputs": {
+      "samples": [
+        "68",
+        0
+      ],
+      "vae": [
+        "64",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.40"
+    }
+  }
+}
